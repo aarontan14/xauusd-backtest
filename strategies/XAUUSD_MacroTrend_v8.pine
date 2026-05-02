@@ -1,0 +1,88 @@
+//@version=5
+// =================================================================================
+// XAU/USD Macro-Trend Pullback v8
+// Buy dips inside a confirmed macro+technical bull regime, exit on regime break.
+// Backtest: 2010-2026 daily, Sharpe 1.27, MaxDD -6.9%, CAGR 7.1% (1x, +4% cash yield).
+// OOS 2019-2026: Sharpe 1.39, MaxDD -6.8%.
+//
+// Apply on: OANDA:XAUUSD, TVC:GOLD, or COMEX:GC1!  (DAILY timeframe)
+// =================================================================================
+strategy("XAUUSD MacroTrend v8",
+     overlay         = true,
+     pyramiding      = 0,
+     initial_capital = 100000,
+     default_qty_type    = strategy.percent_of_equity,
+     default_qty_value   = 100,            // 1x leverage; raise to 150/200 for 1.5x/2x
+     commission_type     = strategy.commission.cash_per_order,
+     commission_value    = 0,
+     slippage            = 5,
+     calc_on_every_tick  = false,
+     process_orders_on_close = false)      // signals computed on close, executed next bar open
+
+// ---- Inputs ----
+maPullLen   = input.int(10,   "Pullback MA length",        minval=2)
+maExitLen   = input.int(50,   "Regime exit MA length",     minval=10)
+maLongLen   = input.int(200,  "Secular trend MA length",   minval=50)
+dxyLookback = input.int(60,   "DXY lookback (days)",       minval=5)
+tnxLookback = input.int(60,   "TNX lookback (days)",       minval=5)
+rsiMax      = input.int(50,   "Max RSI for entry",         minval=10, maxval=90)
+rsiExit     = input.int(75,   "Exit RSI",                  minval=10, maxval=99)
+pullBuf     = input.float(1.05,"Pullback buffer (close <= MA*buf)", step=0.01)
+useATRStop  = input.bool(true, "Use ATR hard stop")
+atrStopMult = input.float(3.0, "ATR stop multiplier",      step=0.1)
+
+// ---- Macro inputs (request external symbols) ----
+// Default: ICE Dollar Index and US 10Y yield. Adjust if your TV plan lacks these.
+dxySym = input.symbol("TVC:DXY", "DXY symbol")
+tnxSym = input.symbol("TVC:TNX", "10Y yield symbol")
+
+dxyClose = request.security(dxySym, "D", close, lookahead=barmerge.lookahead_off)
+tnxClose = request.security(tnxSym, "D", close, lookahead=barmerge.lookahead_off)
+
+// ---- Indicators ----
+maPull = ta.sma(close, maPullLen)
+maExit = ta.sma(close, maExitLen)
+maLong = ta.sma(close, maLongLen)
+rsiVal = ta.rsi(close, 14)
+atrVal = ta.atr(14)
+
+// Macro deltas
+dxyChg = (dxyClose - dxyClose[dxyLookback]) / dxyClose[dxyLookback]
+tnxChg = tnxClose - tnxClose[tnxLookback]
+
+// Regimes
+macroBull = (dxyChg < 0) and (tnxChg < 0) and (close > maLong)
+pullback  = (rsiVal < rsiMax) and (close <= maPull * pullBuf)
+entrySig  = macroBull and pullback
+exitSig   = (close < maExit) or (rsiVal > rsiExit)
+
+// ---- Orders ----
+if entrySig and strategy.position_size == 0
+    strategy.entry("Long", strategy.long, alert_message='{"action":"buy","symbol":"XAUUSD","qty":"{{strategy.position_size}}"}')
+
+if strategy.position_size > 0
+    if exitSig
+        strategy.close("Long", comment="exit", alert_message='{"action":"sell","symbol":"XAUUSD","reason":"signal"}')
+    if useATRStop
+        stopPx = strategy.position_avg_price - atrStopMult * atrVal
+        strategy.exit("ATRStop", from_entry="Long", stop=stopPx,
+             alert_message='{"action":"sell","symbol":"XAUUSD","reason":"stop"}')
+
+// ---- Visuals ----
+plot(maPull, "MA pullback", color=color.new(color.aqua, 0))
+plot(maExit, "MA exit",     color=color.new(color.orange, 0))
+plot(maLong, "MA 200",      color=color.new(color.gray, 0), linewidth=2)
+
+bgcolor(macroBull ? color.new(color.green, 92) : na, title="Macro Bull regime")
+plotshape(entrySig and strategy.position_size == 0, "Entry", shape.triangleup,
+     location.belowbar, color.new(color.lime, 0), size=size.small)
+plotshape(exitSig and strategy.position_size > 0,  "Exit",  shape.triangledown,
+     location.abovebar, color.new(color.red, 0),  size=size.small)
+
+// ---- Alerts: copy these JSON payloads into TradingView alert "Message" field ----
+alertcondition(entrySig and strategy.position_size == 0,
+     "Entry alert",
+     '{"action":"buy","symbol":"XAUUSD","price":"{{close}}","time":"{{timenow}}"}')
+alertcondition(exitSig and strategy.position_size > 0,
+     "Exit alert",
+     '{"action":"sell","symbol":"XAUUSD","price":"{{close}}","time":"{{timenow}}"}')

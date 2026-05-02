@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+.env
+.DS_Store
+.idea/
+.vscode/
+
+# Cached data (will be re-fetched by the monthly job)
+data/*.csv
+
+# Local runtime artifacts
+*.log
