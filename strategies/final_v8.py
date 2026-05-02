@@ -120,36 +120,34 @@ def run_realistic(df, leverage=1.0, initial_equity=100_000.0,
     return eq, tr, metrics
 
 
-df = load_data()
-print(f"Data: {df.index.min().date()} -> {df.index.max().date()}\n")
+if __name__ == "__main__":
+    df = load_data()
+    print(f"Data: {df.index.min().date()} -> {df.index.max().date()}\n")
 
-print("=== Locked v8 backtest, full sample, varying leverage (with 4% cash yield) ===")
-rows = []
-for lev in [1.0, 1.5, 2.0, 3.0]:
-    eq, tr, m = run_realistic(df, leverage=lev)
-    rows.append({"leverage": lev, **m})
-print(pd.DataFrame(rows).to_string(index=False))
+    print("=== Locked v8 backtest, full sample, varying leverage (with 4% cash yield) ===")
+    rows = []
+    for lev in [1.0, 1.5, 2.0, 3.0]:
+        eq, tr, m = run_realistic(df, leverage=lev)
+        rows.append({"leverage": lev, **m})
+    print(pd.DataFrame(rows).to_string(index=False))
 
-print("\n=== In-sample (train: 2010-2018) ===")
-df_train = df.loc[:"2018-12-31"]
-for lev in [1.0, 2.0]:
-    eq, tr, m = run_realistic(df_train, leverage=lev)
-    print(f"  Leverage {lev}x:  CAGR={m['cagr']:.2%}  Sharpe={m['sharpe']:.2f}  MaxDD={m['max_dd']:.2%}  Calmar={m['calmar']:.2f}  Trades={m['n_trades']}")
+    print("\n=== In-sample (train: 2010-2018) ===")
+    df_train = df.loc[:"2018-12-31"]
+    for lev in [1.0, 2.0]:
+        eq, tr, m = run_realistic(df_train, leverage=lev)
+        print(f"  Leverage {lev}x:  CAGR={m['cagr']:.2%}  Sharpe={m['sharpe']:.2f}  MaxDD={m['max_dd']:.2%}  Calmar={m['calmar']:.2f}  Trades={m['n_trades']}")
 
-print("\n=== Out-of-sample (test: 2019-2026) ===")
-# build signals on full df, restrict equity curve eval to OOS window using sliced backtest
-df_oos = df.loc["2018-06-01":]  # include warm-up before 2019
-for lev in [1.0, 2.0]:
-    eq, tr, m = run_realistic(df_oos.loc["2019-01-01":], leverage=lev)
-    print(f"  Leverage {lev}x:  CAGR={m['cagr']:.2%}  Sharpe={m['sharpe']:.2f}  MaxDD={m['max_dd']:.2%}  Calmar={m['calmar']:.2f}  Trades={m['n_trades']}")
+    print("\n=== Out-of-sample (test: 2019-2026) ===")
+    df_oos = df.loc["2018-06-01":]
+    for lev in [1.0, 2.0]:
+        eq, tr, m = run_realistic(df_oos.loc["2019-01-01":], leverage=lev)
+        print(f"  Leverage {lev}x:  CAGR={m['cagr']:.2%}  Sharpe={m['sharpe']:.2f}  MaxDD={m['max_dd']:.2%}  Calmar={m['calmar']:.2f}  Trades={m['n_trades']}")
 
-# Buy-hold benchmark
-bh = buy_hold(df)
-m = bh["metrics"]
-print(f"\nBenchmark Buy-and-hold (full): CAGR={m['cagr']:.2%}  Sharpe={m['sharpe']:.2f}  MaxDD={m['max_dd']:.2%}  Calmar={m['cagr']/abs(m['max_dd']):.2f}")
+    bh = buy_hold(df)
+    m = bh["metrics"]
+    print(f"\nBenchmark Buy-and-hold (full): CAGR={m['cagr']:.2%}  Sharpe={m['sharpe']:.2f}  MaxDD={m['max_dd']:.2%}  Calmar={m['cagr']/abs(m['max_dd']):.2f}")
 
-# Save final equity curve at leverage=2 for plotting
-eq_full, tr_full, m_full = run_realistic(df, leverage=2.0)
-eq_full.to_csv(os.path.join(os.path.dirname(__file__), "..", "data", "v8_final_equity.csv"))
-tr_full.to_csv(os.path.join(os.path.dirname(__file__), "..", "data", "v8_final_trades.csv"), index=False)
-print(f"\nSaved final equity curve & trade log (leverage=2x).")
+    eq_full, tr_full, m_full = run_realistic(df, leverage=2.0)
+    eq_full.to_csv(os.path.join(os.path.dirname(__file__), "..", "data", "v8_final_equity.csv"))
+    tr_full.to_csv(os.path.join(os.path.dirname(__file__), "..", "data", "v8_final_trades.csv"), index=False)
+    print(f"\nSaved final equity curve & trade log (leverage=2x).")
