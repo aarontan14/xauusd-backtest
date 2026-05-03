@@ -1,0 +1,69 @@
+//@version=5
+// =================================================================================
+// BTC / ETH Vol-Weighted Donchian Breakout (C6)
+// Buy on N-day high while above the long-term MA, exit on close below short MA.
+// Different default params per asset — set them via the inputs:
+//   BTC: dc_len=10, ma_exit=50, ma_long=100   → OOS Sharpe 1.35, full Sharpe 1.50, DD -53%
+//   ETH: dc_len=30, ma_exit=50, ma_long=150   → OOS Sharpe 1.00, full Sharpe 1.07, DD -44%
+//
+// Apply on: BINANCE:BTCUSDT / BINANCE:ETHUSDT / BYBIT:BTCUSDT etc., DAILY timeframe.
+// =================================================================================
+strategy("Crypto VolBreakout C6",
+     overlay         = true,
+     pyramiding      = 0,
+     initial_capital = 100000,
+     default_qty_type    = strategy.percent_of_equity,
+     default_qty_value   = 100,
+     commission_type     = strategy.commission.percent,
+     commission_value    = 0.05,    // 5 bps round-trip approx
+     slippage            = 5,
+     calc_on_every_tick  = false,
+     process_orders_on_close = false)
+
+// ---- Inputs (defaults are BTC; override for ETH) ----
+preset = input.string("BTC", "Asset preset", options=["BTC","ETH","Custom"])
+
+// Auto-set per asset preset; user can override by choosing Custom.
+defaultDc      = preset == "BTC" ? 10  : preset == "ETH" ? 30  : 20
+defaultMaExit  = preset == "BTC" ? 50  : preset == "ETH" ? 50  : 50
+defaultMaLong  = preset == "BTC" ? 100 : preset == "ETH" ? 150 : 200
+
+dcLen   = input.int(defaultDc,     "Donchian breakout length", minval=2)
+maExit  = input.int(defaultMaExit, "Exit MA length",           minval=5)
+maLong  = input.int(defaultMaLong, "Long-term trend MA length", minval=20)
+
+// ---- Indicators ----
+dcHi = ta.highest(high, dcLen)[1]            // shift(1) so signal uses prior bar's range
+maExitV = ta.sma(close, maExit)
+maLongV = ta.sma(close, maLong)
+
+bullRegime = close > maLongV
+entrySig = (close >= dcHi) and bullRegime
+exitSig  = close < maExitV
+
+// ---- Orders ----
+if entrySig and strategy.position_size == 0
+    strategy.entry("Long", strategy.long,
+        alert_message='{"action":"buy","symbol":"{{ticker}}","preset":"' + preset + '","price":"{{close}}"}')
+
+if strategy.position_size > 0 and exitSig
+    strategy.close("Long", comment="exit",
+        alert_message='{"action":"sell","symbol":"{{ticker}}","preset":"' + preset + '","price":"{{close}}"}')
+
+// ---- Visuals ----
+plot(dcHi,   "Donchian high", color=color.new(color.aqua, 0))
+plot(maExitV,"Exit MA",       color=color.new(color.orange, 0))
+plot(maLongV,"Long MA",       color=color.new(color.gray, 0), linewidth=2)
+bgcolor(bullRegime ? color.new(color.green, 92) : na)
+plotshape(entrySig and strategy.position_size == 0, "Entry", shape.triangleup,
+     location.belowbar, color.new(color.lime, 0), size=size.small)
+plotshape(exitSig and strategy.position_size > 0,  "Exit",  shape.triangledown,
+     location.abovebar, color.new(color.red, 0),  size=size.small)
+
+// ---- Alerts ----
+alertcondition(entrySig and strategy.position_size == 0,
+     "Entry alert",
+     '{"action":"buy","symbol":"{{ticker}}","preset":"' + preset + '","price":"{{close}}","time":"{{timenow}}"}')
+alertcondition(exitSig and strategy.position_size > 0,
+     "Exit alert",
+     '{"action":"sell","symbol":"{{ticker}}","preset":"' + preset + '","price":"{{close}}","time":"{{timenow}}"}')

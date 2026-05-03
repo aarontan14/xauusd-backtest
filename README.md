@@ -162,3 +162,123 @@ spread/cost characteristics differ — re-tune.
 - **Cadence:** check signal daily after NY close (~ 5:00–6:00 SGT).
 - **Manual override rule:** if you hit −10 % drawdown, stop the bot, review the
   regime, decide consciously whether to resume.
+
+---
+
+# Crypto strategy (BTC / ETH) — C6 vol-weighted Donchian breakout
+
+The XAU/USD v8 logic does **not** transfer to crypto (different macro drivers — DXY/TNX
+filter rejects most crypto entries). A separate strategy was designed and tuned per asset.
+
+## C6 design
+
+**Entry — both:**
+1. Close ≥ N-day rolling high (Donchian breakout)
+2. Close > L-day moving average (long-term trend filter)
+
+**Exit:**
+- Close < M-day moving average
+
+That's it. Pure trend-follower designed for crypto's long, persistent trends.
+
+## Locked parameters (walk-forward selected, train ≤ 2022, test 2023-2026)
+
+| Asset | dc_len | ma_exit | ma_long | OOS Sharpe | OOS Calmar | Full CAGR | Full Sharpe | Full DD |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| **BTC** | 10 | 50 | 100 | **1.35** | 1.96 | **78.1 %** | 1.50 | −52.8 % |
+| **ETH** | 30 | 50 | 150 | **1.00** | 1.41 | **48.2 %** | 1.07 | −44.0 % |
+| Buy-hold BTC | — | — | — | — | — | 59.3 % | 1.02 | −83.4 % |
+| Buy-hold ETH | — | — | — | — | — | 26.7 % | 0.71 | −94.0 % |
+
+Both beat buy-and-hold on **CAGR, Sharpe AND drawdown** simultaneously. ETH stats are
+particularly good: 70 % win rate, profit factor 4.3.
+
+## Files
+
+- `engine/crypto_backtest.py`        — engine + strategy variants for BTC/ETH
+- `strategies/run_crypto_compare.py` — compares v8-gold dropped on crypto + 6 crypto variants vs buy-hold
+- `strategies/tune_crypto.py`        — grid search + walk-forward per asset
+- `strategies/final_crypto.py`       — locked params, leverage sweep
+- `strategies/Crypto_VolBreakout.pine` — TradingView Pine v5 with BTC/ETH presets
+- `strategies/live_crypto_bot.py`    — CCXT-based live trader (Bybit/OKX/IndependentReserve/etc.)
+
+## Singapore broker reality for crypto
+
+| Platform | Auto-trade BTC/ETH? | API fit | SG legal status |
+|---|---|---|---|
+| **Independent Reserve** | ✅ spot BTC/ETH | CCXT-supported | **MAS-licensed** — cleanest path |
+| **Bybit** | ✅ spot + perps + options | excellent CCXT support | accessible from SG, not MAS-licensed for retail |
+| **OKX** | ✅ spot + perps | excellent CCXT support | accessible from SG, not MAS-licensed |
+| **Coinbase** | partial | CCXT-supported | limited SG availability |
+| **Binance** | API works for grandfathered users | CCXT | binance.com is **not licensed in SG** for new accounts; binance.sg shut down |
+| **Crypto.com** | ✅ spot | CCXT-supported | check current MAS status |
+| **IBKR** | ✅ via crypto **ETFs** (IBIT, FETH, ETHA, BITO) | reuse `live_ibkr_bot.py` | already your existing setup |
+| **Tiger Trade / Moo Moo** | ✅ via crypto ETFs (IBIT, FETH) | their APIs are stocks/options/ETFs only | accessible |
+
+**Recommended paths:**
+1. **Cleanest legal SG path:** Independent Reserve — set `--exchange independentreserve`
+   on `live_crypto_bot.py`.
+2. **Best liquidity / fees / API:** Bybit or OKX — set `--exchange bybit` etc.
+3. **If you'd rather stay inside your existing IBKR / Tiger / Moo Moo setup:** trade
+   the crypto ETFs (IBIT for BTC, FETH/ETHA for ETH). The signal still applies — just
+   feed your `live_ibkr_bot.py` a different contract. Note: ETFs trade only during US
+   market hours (21:30 – 04:00 SGT), so signals computed at UTC midnight will execute
+   the next NY session open. Slightly worse fills than spot crypto.
+
+## Live trading
+
+```bash
+pip install ccxt yfinance pandas numpy
+
+# 1. Create API key on your exchange (READ + TRADE only — DO NOT enable WITHDRAW).
+# 2. Export creds (use your shell's env-var setter):
+#      Linux/Mac:  export BYBIT_API_KEY=...
+#                  export BYBIT_API_SECRET=...
+#      Windows PowerShell:  $env:BYBIT_API_KEY = "..."
+#                           $env:BYBIT_API_SECRET = "..."
+
+# 3. Dry-run (recommended first):
+python strategies/live_crypto_bot.py --asset BTC --exchange bybit
+python strategies/live_crypto_bot.py --asset ETH --exchange bybit
+
+# 4. Testnet (Bybit/OKX have full sandboxes, free fake funds):
+python strategies/live_crypto_bot.py --asset BTC --exchange bybit --testnet --live
+
+# 5. Live (real money):
+python strategies/live_crypto_bot.py --asset BTC --exchange bybit --live
+```
+
+Schedule daily after UTC midnight (e.g. 09:00 SGT = 01:00 UTC), same pattern as the
+gold bot. The C6 entry signal triggers maybe 5–10 times per year per asset, so a
+daily check is plenty.
+
+## Crypto-specific caveats
+
+1. **Spot leverage warning.** The Pine + Python both default to 1.0x. Crypto is
+   already 5-10× more volatile than gold. Crypto perps offer 50-100× leverage —
+   don't. Even 2× on this strategy turns a −44 % DD into −60 %+, and you can be
+   liquidated before the regime exit fires.
+2. **Exchange counterparty risk.** A blown-up exchange (FTX-style) wipes your
+   capital regardless of strategy. Spread across exchanges; never keep more than
+   you can afford to lose on a single venue.
+3. **API key scope.** Always disable withdraw permission on bot keys.
+4. **Slippage in fast moves.** Backtest assumes 5 bps; in panic crashes you can
+   pay 50–200 bps. Stop-loss orders especially.
+5. **Drawdown is structural.** The −53 % BTC DD happened during the 2022 bear.
+   Do not run this strategy with money you'll need within 24 months.
+6. **Yfinance daily data quirks.** BTC/ETH on yfinance use a 24h close at
+   ~00:00 UTC. Live exchange will use exchange-local close. Differences in close
+   timing can shift signal by 1 day occasionally. For tighter execution, swap
+   yfinance for the exchange's own daily kline endpoint (CCXT: `fetch_ohlcv`).
+
+## Recommended starting point (crypto)
+
+- **Capital:** start small — $1k-$5k per asset is enough to validate execution.
+- **Leverage:** **1.0× spot only** for the first 6 months. Step up only after you
+  see the strategy survive a real drawdown.
+- **Asset split:** if running both, split capital ~60/40 BTC/ETH (BTC has the
+  better risk-adjusted profile).
+- **Cadence:** daily check after exchange daily close (varies by exchange — easiest
+  to use 00:00 UTC).
+- **Halt rule:** if real account drawdown breaches −20 %, pause the bot and review.
+  Real DD is usually worse than backtest because of execution friction.
