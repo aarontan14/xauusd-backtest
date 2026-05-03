@@ -1,27 +1,18 @@
 """
-Monthly health check for the v8 MacroTrend strategy. Runs locally.
+Monthly health check for the v8 (gold) and C6 (BTC/ETH) strategies. Runs locally.
 
 What it does:
-  1. Re-fetches fresh daily data via yfinance (XAUUSD/GC=F, DXY, TNX, VIX, SPX)
+  1. Re-fetches fresh daily data via yfinance:
+       - Gold + macro: GC=F, DX-Y.NYB, ^TNX, ^VIX, ^GSPC
+       - Crypto:       BTC-USD, ETH-USD
      and overwrites data/*_daily.csv.
-  2. Runs the locked v8 backtest at 1.0x leverage with cash yield, full sample.
-  3. Also runs the OOS slice (2019-now) and a buy-and-hold benchmark.
-  4. Compares to the LOCKED BASELINE and flags regime drift if thresholds breached.
-  5. Writes a timestamped report to logs/monthly_YYYY-MM-DD.txt and prints to stdout.
-
-Locked baseline (from the original backtest, 2010-2026, 1x leverage, +4% cash yield):
-  CAGR    = 7.14%
-  Sharpe  = 1.27
-  MaxDD   = -6.9%
-  Calmar  = 1.03
-
-Warning thresholds:
-  - Sharpe drops below 0.80
-  - MaxDD breaches -12.0%
-  - Trailing 2024+ window CAGR turns negative
+  2. Runs each locked strategy at 1.0x leverage on the full sample.
+     Also runs OOS / trailing windows.
+  3. Compares to the LOCKED BASELINE per asset and flags regime drift.
+  4. Writes a timestamped report to logs/monthly_YYYY-MM-DD.txt and prints to stdout.
 """
 from __future__ import annotations
-import os, sys, json, traceback
+import os, sys, traceback
 from datetime import datetime
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -30,115 +21,180 @@ sys.path.insert(0, os.path.join(ROOT, "engine"))
 import pandas as pd
 import numpy as np
 
-# Locked baseline & thresholds
-BASELINE = {"cagr": 0.0714, "sharpe": 1.27, "max_dd": -0.069, "calmar": 1.03}
-THRESHOLDS = {"sharpe_min": 0.80, "max_dd_min": -0.12, "trailing_cagr_min": 0.0}
+# --------------------------------------------------------------------------
+# Locked baselines per asset (full sample, 1x leverage)
+# --------------------------------------------------------------------------
+BASELINES = {
+    "XAUUSD_v8": {"cagr": 0.0714, "sharpe": 1.27, "max_dd": -0.069, "calmar": 1.03},
+    "BTC_C6":    {"cagr": 0.7808, "sharpe": 1.50, "max_dd": -0.528, "calmar": 1.48},
+    "ETH_C6":    {"cagr": 0.4822, "sharpe": 1.07, "max_dd": -0.440, "calmar": 1.09},
+}
 
+# Per-asset regime-warning thresholds. Wider for crypto because crypto runs at
+# structurally higher vol and DDs.
+THRESHOLDS = {
+    "XAUUSD_v8": {"sharpe_min": 0.80, "max_dd_min": -0.12, "trailing_cagr_min": 0.0},
+    "BTC_C6":    {"sharpe_min": 0.90, "max_dd_min": -0.65, "trailing_cagr_min": 0.0},
+    "ETH_C6":    {"sharpe_min": 0.65, "max_dd_min": -0.55, "trailing_cagr_min": 0.0},
+}
+
+
+# --------------------------------------------------------------------------
+# Data refresh
+# --------------------------------------------------------------------------
 
 def refresh_data(log):
     import yfinance as yf
     out_dir = os.path.join(ROOT, "data")
     os.makedirs(out_dir, exist_ok=True)
     tickers = {
-        "XAUUSD_daily.csv": "GC=F",
-        "DXY_daily.csv":    "DX-Y.NYB",
-        "TNX_daily.csv":    "^TNX",
-        "VIX_daily.csv":    "^VIX",
-        "SPX_daily.csv":    "^GSPC",
+        "XAUUSD_daily.csv": ("GC=F",     "2010-01-01"),
+        "DXY_daily.csv":    ("DX-Y.NYB", "2010-01-01"),
+        "TNX_daily.csv":    ("^TNX",     "2010-01-01"),
+        "VIX_daily.csv":    ("^VIX",     "2010-01-01"),
+        "SPX_daily.csv":    ("^GSPC",    "2010-01-01"),
+        "BTC_daily.csv":    ("BTC-USD",  "2017-01-01"),
+        "ETH_daily.csv":    ("ETH-USD",  "2017-01-01"),
     }
     end = datetime.utcnow().date().isoformat()
-    for fname, sym in tickers.items():
-        df = yf.download(sym, start="2010-01-01", end=end, interval="1d",
+    for fname, (sym, start) in tickers.items():
+        df = yf.download(sym, start=start, end=end, interval="1d",
                          auto_adjust=False, progress=False)
         if len(df) == 0:
-            log(f"WARN: {sym} returned 0 rows")
+            log(f"  WARN: {sym} returned 0 rows")
             continue
-        path = os.path.join(out_dir, fname)
-        df.to_csv(path)
-        log(f"  fetched {sym} -> {fname}: {len(df)} rows  ({df.index.min().date()} -> {df.index.max().date()})")
+        df.to_csv(os.path.join(out_dir, fname))
+        log(f"  fetched {sym:9s} -> {fname:20s}: {len(df):4d} rows  "
+            f"({df.index.min().date()} -> {df.index.max().date()})")
 
 
-def run_check():
+# --------------------------------------------------------------------------
+# Per-strategy runners
+# --------------------------------------------------------------------------
+
+def run_xauusd():
     from final_v8 import run_realistic
     from backtest import load_data, buy_hold
 
     df = load_data()
-    full = run_realistic(df, leverage=1.0)
-    eq_full, tr_full, m_full = full
-
-    df_oos = df.loc["2019-01-01":]
-    eq_oos, tr_oos, m_oos = run_realistic(df_oos, leverage=1.0)
-
-    df_2024 = df.loc["2024-01-01":]
-    eq_24, tr_24, m_24 = run_realistic(df_2024, leverage=1.0) if len(df_2024) > 250 else (None, None, {})
-
+    _eq, _tr, m_full = run_realistic(df, leverage=1.0)
+    _eq, _tr, m_oos  = run_realistic(df.loc["2019-01-01":], leverage=1.0)
+    df_24 = df.loc["2024-01-01":]
+    m_24 = run_realistic(df_24, leverage=1.0)[2] if len(df_24) > 250 else {}
     bh = buy_hold(df)["metrics"]
-    bh_calmar = bh["cagr"] / abs(bh["max_dd"]) if bh["max_dd"] else 0
-
+    bh["calmar"] = bh["cagr"] / abs(bh["max_dd"]) if bh["max_dd"] else 0
     return {
         "data_first": df.index.min().date().isoformat(),
         "data_last":  df.index.max().date().isoformat(),
         "n_bars":     len(df),
         "full":       m_full,
         "oos":        m_oos,
-        "trailing24": m_24,
-        "buy_hold":   {**bh, "calmar": bh_calmar},
+        "trailing":   m_24,
+        "trailing_label": "2024-now",
+        "buy_hold":   bh,
     }
 
 
-def evaluate_regime(metrics):
-    warns, critical = [], False
+def run_crypto(asset: str):
+    """asset in {'BTC','ETH'}"""
+    from crypto_backtest import load_crypto, run_crypto as runner, buy_hold_crypto
+    from final_crypto import strat_c6, PARAMS
+
+    df = load_crypto(asset)
+    sig = strat_c6(df, **PARAMS[asset])
+    res = runner(sig, leverage=1.0)
+    m_full = res["metrics"]
+
+    sig_oos = strat_c6(df, **PARAMS[asset]).loc["2023-01-01":]
+    m_oos = runner(sig_oos, leverage=1.0)["metrics"]
+
+    df_24 = df.loc["2024-01-01":]
+    if len(df_24) > 250:
+        sig_24 = strat_c6(df, **PARAMS[asset]).loc["2024-01-01":]
+        m_24 = runner(sig_24, leverage=1.0)["metrics"]
+    else:
+        m_24 = {}
+
+    bh = buy_hold_crypto(df)["metrics"]
+    bh["calmar"] = bh["cagr"] / abs(bh["max_dd"]) if bh["max_dd"] else 0
+    return {
+        "data_first": df.index.min().date().isoformat(),
+        "data_last":  df.index.max().date().isoformat(),
+        "n_bars":     len(df),
+        "full":       m_full,
+        "oos":        m_oos,
+        "trailing":   m_24,
+        "trailing_label": "2024-now",
+        "buy_hold":   bh,
+    }
+
+
+# --------------------------------------------------------------------------
+# Regime evaluation + rendering
+# --------------------------------------------------------------------------
+
+def evaluate(strategy_id: str, metrics: dict):
+    base = BASELINES[strategy_id]
+    th   = THRESHOLDS[strategy_id]
     full = metrics["full"]
-    if full["sharpe"] < THRESHOLDS["sharpe_min"]:
-        warns.append(f"[WARN] Sharpe below {THRESHOLDS['sharpe_min']:.2f} (now {full['sharpe']:.2f}). Possible regime drift.")
-    if full["max_dd"] < THRESHOLDS["max_dd_min"]:
-        warns.append(f"[WARN] MaxDD breached {THRESHOLDS['max_dd_min']:.0%} (now {full['max_dd']:.2%}). Risk profile degraded.")
-    if metrics["trailing24"] and metrics["trailing24"].get("cagr", 0) < THRESHOLDS["trailing_cagr_min"]:
-        warns.append(f"[WARN] 2024+ trailing CAGR negative ({metrics['trailing24']['cagr']:.2%}). Recent performance poor.")
-    if len(warns) >= 2:
-        critical = True
-    return warns, critical
+
+    warns = []
+    if full["sharpe"] < th["sharpe_min"]:
+        warns.append(f"Sharpe below {th['sharpe_min']:.2f} (now {full['sharpe']:.2f})")
+    if full["max_dd"] < th["max_dd_min"]:
+        warns.append(f"MaxDD breached {th['max_dd_min']:.0%} (now {full['max_dd']:.2%})")
+    if metrics["trailing"] and metrics["trailing"].get("cagr", 0) < th["trailing_cagr_min"]:
+        warns.append(f"{metrics['trailing_label']} trailing CAGR negative ({metrics['trailing']['cagr']:.2%})")
+    critical = len(warns) >= 2
+    return warns, critical, base
 
 
-def render_report(metrics, warns, critical) -> str:
+def render_block(strategy_id: str, asset_label: str, metrics: dict,
+                 warns: list, critical: bool, base: dict) -> str:
     full = metrics["full"]
     oos  = metrics["oos"]
     bh   = metrics["buy_hold"]
-    today = datetime.utcnow().date().isoformat()
     L = []
-    L.append(f"=== XAUUSD v8 MONTHLY HEALTH CHECK - {today} ===\n")
-    L.append(f"Data window: {metrics['data_first']} -> {metrics['data_last']}  ({metrics['n_bars']} bars)\n")
-    L.append("Full sample @ 1.0x leverage:")
-    L.append(f"  CAGR    : {full['cagr']:.2%}    (baseline 7.14%, drift {full['cagr']-BASELINE['cagr']:+.2%})")
-    L.append(f"  Sharpe  : {full['sharpe']:.2f}     (baseline 1.27,  drift {full['sharpe']-BASELINE['sharpe']:+.2f})")
-    L.append(f"  MaxDD   : {full['max_dd']:.2%}    (baseline -6.9%, drift {full['max_dd']-BASELINE['max_dd']:+.2%})")
-    L.append(f"  Calmar  : {full['calmar']:.2f}     (baseline 1.03)")
-    L.append(f"  Trades  : {int(full['n_trades'])}")
-    L.append("")
-    L.append(f"Out-of-sample 2019-now @ 1.0x:")
-    L.append(f"  CAGR {oos['cagr']:.2%}  Sharpe {oos['sharpe']:.2f}  MaxDD {oos['max_dd']:.2%}")
-    L.append("")
-    L.append("Buy-and-hold benchmark (full sample):")
-    L.append(f"  CAGR {bh['cagr']:.2%}  Sharpe {bh['sharpe']:.2f}  MaxDD {bh['max_dd']:.2%}")
-    L.append("")
-    L.append("=== REGIME STATUS ===")
+    L.append(f"--- {asset_label} ({strategy_id}) ---")
+    L.append(f"  Data: {metrics['data_first']} -> {metrics['data_last']}  ({metrics['n_bars']} bars)")
+    L.append(f"  Full sample @ 1.0x:")
+    L.append(f"    CAGR   : {full['cagr']:>7.2%}   (baseline {base['cagr']:.2%}, drift {full['cagr']-base['cagr']:+.2%})")
+    L.append(f"    Sharpe : {full['sharpe']:>7.2f}    (baseline {base['sharpe']:.2f},  drift {full['sharpe']-base['sharpe']:+.2f})")
+    L.append(f"    MaxDD  : {full['max_dd']:>7.2%}   (baseline {base['max_dd']:.1%}, drift {full['max_dd']-base['max_dd']:+.2%})")
+    L.append(f"    Calmar : {full['calmar']:>7.2f}    (baseline {base['calmar']:.2f})")
+    L.append(f"    Trades : {int(full['n_trades'])}")
+    L.append(f"  OOS slice: CAGR {oos['cagr']:.2%}  Sharpe {oos['sharpe']:.2f}  MaxDD {oos['max_dd']:.2%}")
+    L.append(f"  Buy-hold:  CAGR {bh['cagr']:.2%}  Sharpe {bh['sharpe']:.2f}  MaxDD {bh['max_dd']:.2%}")
     if not warns:
-        L.append("[OK] Strategy edge intact. No thresholds breached.")
-    else:
-        if critical:
-            L.append(f"[CRITICAL] Multiple thresholds breached:")
-        for w in warns:
-            L.append(f"  {w}")
-    L.append("")
-    L.append("=== RECOMMENDATION ===")
-    if not warns:
-        L.append("Continue trading the locked v8 parameters at 1.0x-1.5x leverage. Edge intact.")
+        L.append(f"  Status: [OK] Edge intact.")
     elif critical:
-        L.append("HALT live trading. Multiple breach signals — likely a regime shift in gold's macro driver. Re-run tune_v8.py to refit, then evaluate whether to redeploy.")
+        L.append(f"  Status: [CRITICAL] {len(warns)} thresholds breached: " + "; ".join(warns))
     else:
-        L.append("Reduce position sizing (drop to 1.0x if running leveraged) and monitor closely. One threshold breached — could be a transient drawdown, but watch next month's check.")
+        L.append(f"  Status: [WARN] " + "; ".join(warns))
+    return "\n".join(L)
+
+
+def render_report(blocks: list[str], any_critical: bool, any_warn: bool) -> str:
+    today = datetime.utcnow().date().isoformat()
+    L = [f"=== STRATEGY MONTHLY HEALTH CHECK - {today} ==="]
+    L.append("")
+    L.extend(blocks)
+    L.append("")
+    L.append("=== OVERALL RECOMMENDATION ===")
+    if any_critical:
+        L.append("HALT live trading on any [CRITICAL] strategies. Re-tune via the corresponding")
+        L.append("tune_*.py script before redeploying. Continue trading any [OK] strategies.")
+    elif any_warn:
+        L.append("Reduce position sizing on [WARN] strategies (drop to 1.0x if leveraged), and")
+        L.append("monitor closely. Single threshold breaches can be transient — confirm next month.")
+    else:
+        L.append("All strategies healthy. Continue trading locked parameters at 1.0x-1.5x leverage.")
     return "\n".join(L) + "\n"
 
+
+# --------------------------------------------------------------------------
+# Main
+# --------------------------------------------------------------------------
 
 def main():
     log_dir = os.path.join(ROOT, "logs")
@@ -154,15 +210,28 @@ def main():
     try:
         log("Refreshing market data ...")
         refresh_data(log)
-        log("Running v8 backtest ...")
-        metrics = run_check()
-        warns, critical = evaluate_regime(metrics)
-        report = render_report(metrics, warns, critical)
+
+        log("\nRunning backtests ...")
+        results = {
+            ("XAUUSD_v8", "XAU/USD v8 MacroTrend"): run_xauusd(),
+            ("BTC_C6",    "BTC C6 VolBreakout"):    run_crypto("BTC"),
+            ("ETH_C6",    "ETH C6 VolBreakout"):    run_crypto("ETH"),
+        }
+
+        blocks = []
+        any_critical = any_warn = False
+        for (sid, label), metrics in results.items():
+            warns, critical, base = evaluate(sid, metrics)
+            blocks.append(render_block(sid, label, metrics, warns, critical, base))
+            if critical: any_critical = True
+            if warns:    any_warn = True
+
+        report = render_report(blocks, any_critical, any_warn)
         log("\n" + report)
+
     except Exception:
         tb = traceback.format_exc()
         log(f"\nFAILED:\n{tb}")
-        report = f"=== XAUUSD v8 MONTHLY HEALTH CHECK - FAILED {datetime.utcnow().date()} ===\n\n{tb}"
 
     with open(logfile, "w", encoding="utf-8") as f:
         f.write("\n".join(lines))
