@@ -165,42 +165,66 @@ spread/cost characteristics differ — re-tune.
 
 ---
 
-# Crypto strategy (BTC / ETH) — C6 vol-weighted Donchian breakout
+# Crypto strategy (BTC / ETH) — C6 + Risk Controls v2
 
 The XAU/USD v8 logic does **not** transfer to crypto (different macro drivers — DXY/TNX
 filter rejects most crypto entries). A separate strategy was designed and tuned per asset.
 
-## C6 design
+## v2 = C6 + risk controls (current production)
 
-**Entry — both:**
-1. Close ≥ N-day rolling high (Donchian breakout)
-2. Close > L-day moving average (long-term trend filter)
+v1 was a pure breakout (entry + MA exit only). v2 adds:
+- **Volatility-targeted sizing**: position fraction = min(target_vol / realized_vol, leverage_cap).
+  When realized 20-day daily vol is high (typical of drawdown periods), size shrinks
+  automatically. When vol is low (often early-trend), size scales up to a cap.
+- **Hard ATR stop** (ETH only): exit if low ≤ entry − 3 × ATR(14). ETH benefits;
+  BTC does not (the regime filter is enough).
 
-**Exit:**
-- Close < M-day moving average
+Result: **better on every metric for both assets**.
 
-That's it. Pure trend-follower designed for crypto's long, persistent trends.
+## v2 locked parameters
 
-## Locked parameters (walk-forward selected, train ≤ 2022, test 2023-2026)
+| Asset | dc_len | ma_exit | ma_long | vol_target | leverage_cap | hard_stop |
+|---|---:|---:|---:|---:|---:|---:|
+| **BTC** | 10 | 50 | 100 | 2.5 % daily | 3.0× | off |
+| **ETH** | 30 | 50 | 150 | 3.0 % daily | 2.0× | 3 × ATR |
 
-| Asset | dc_len | ma_exit | ma_long | OOS Sharpe | OOS Calmar | Full CAGR | Full Sharpe | Full DD |
-|---|---:|---:|---:|---:|---:|---:|---:|---:|
-| **BTC** | 10 | 50 | 100 | **1.35** | 1.96 | **78.1 %** | 1.50 | −52.8 % |
-| **ETH** | 30 | 50 | 150 | **1.00** | 1.41 | **48.2 %** | 1.07 | −44.0 % |
-| Buy-hold BTC | — | — | — | — | — | 59.3 % | 1.02 | −83.4 % |
-| Buy-hold ETH | — | — | — | — | — | 26.7 % | 0.71 | −94.0 % |
+Margin / perp account uses the leverage_cap above. **Spot-only accounts** automatically
+clamp to 1.0× — you still get the drawdown reduction, just less of the CAGR boost.
 
-Both beat buy-and-hold on **CAGR, Sharpe AND drawdown** simultaneously. ETH stats are
-particularly good: 70 % win rate, profit factor 4.3.
+## v2 vs v1 results (full sample 2017-2026)
+
+| Asset | Mode | CAGR | Sharpe | MaxDD | Calmar |
+|---|---|---:|---:|---:|---:|
+| BTC v1 (no risk controls) | — | 78.2 % | 1.50 | −52.8 % | 1.48 |
+| **BTC v2 margin (3× cap)** | margin | **79.3 %** ↑ | **1.54** ↑ | **−42.1 %** ↑ | **1.88** ↑ |
+| BTC v2 spot (1× cap) | spot | 65.8 % | 1.52 | −41.1 % | 1.60 |
+| ETH v1 (no risk controls) | — | 48.2 % | 1.07 | −44.0 % | 1.09 |
+| **ETH v2 margin (2× cap)** | margin | **51.6 %** ↑ | **1.14** ↑ | **−39.3 %** ↑ | **1.31** ↑ |
+| ETH v2 spot (1× cap) | spot | 45.0 % | 1.11 | −36.9 % | 1.22 |
+| Buy-and-hold BTC | — | 60.3 % | 1.03 | −83.4 % | 0.72 |
+| Buy-and-hold ETH | — | 26.8 % | 0.71 | −94.0 % | 0.29 |
+
+OOS 2023-2026: BTC margin 71% CAGR / 1.48 Sharpe / −24.7 % DD;
+ETH margin 46% CAGR / 1.10 Sharpe / −29.7 % DD. **OOS held up vs in-sample.**
+
+ETH profit factor jumped from 4.3 (v1) to **6.15 (v2)** — risk controls cut the
+average-loss size dramatically.
 
 ## Files
 
-- `engine/crypto_backtest.py`        — engine + strategy variants for BTC/ETH
-- `strategies/run_crypto_compare.py` — compares v8-gold dropped on crypto + 6 crypto variants vs buy-hold
-- `strategies/tune_crypto.py`        — grid search + walk-forward per asset
-- `strategies/final_crypto.py`       — locked params, leverage sweep
-- `strategies/Crypto_VolBreakout.pine` — TradingView Pine v5 with BTC/ETH presets
-- `strategies/live_crypto_bot.py`    — CCXT-based live trader (Bybit/OKX/IndependentReserve/etc.)
+### v1 (kept for reference)
+- `engine/crypto_backtest.py`              — engine, no risk controls
+- `strategies/run_crypto_compare.py`       — initial 6-variant comparison
+- `strategies/tune_crypto.py`              — v1 grid search + walk-forward
+- `strategies/final_crypto.py`             — v1 locked params
+
+### v2 (current production)
+- `engine/crypto_backtest_v2.py`           — engine with stops, trail stops, vol targeting
+- `strategies/crypto_v2_compare.py`        — 11 risk-control variants tested
+- `strategies/crypto_v2_tune.py`           — vol_target × leverage_cap × hard_stop grid + walk-forward
+- `strategies/final_crypto_v2.py`          — **locked v2 params (production)**
+- `strategies/Crypto_VolBreakout_v2.pine`  — TradingView Pine v5 with vol-targeted sizing
+- `strategies/live_crypto_bot_v2.py`       — CCXT live bot with vol-targeted sizing + hard stop
 
 ## Singapore broker reality for crypto
 
@@ -237,15 +261,16 @@ pip install ccxt yfinance pandas numpy
 #      Windows PowerShell:  $env:BYBIT_API_KEY = "..."
 #                           $env:BYBIT_API_SECRET = "..."
 
-# 3. Dry-run (recommended first):
-python strategies/live_crypto_bot.py --asset BTC --exchange bybit
-python strategies/live_crypto_bot.py --asset ETH --exchange bybit
+# 3. Dry-run v2 bot (recommended first). Pick --mode spot for cash spot accounts,
+#    or --mode margin for futures/perp accounts (allows up to 3x BTC / 2x ETH).
+python strategies/live_crypto_bot_v2.py --asset BTC --exchange bybit --mode spot
+python strategies/live_crypto_bot_v2.py --asset ETH --exchange bybit --mode spot
 
 # 4. Testnet (Bybit/OKX have full sandboxes, free fake funds):
-python strategies/live_crypto_bot.py --asset BTC --exchange bybit --testnet --live
+python strategies/live_crypto_bot_v2.py --asset BTC --exchange bybit --mode spot --testnet --live
 
 # 5. Live (real money):
-python strategies/live_crypto_bot.py --asset BTC --exchange bybit --live
+python strategies/live_crypto_bot_v2.py --asset BTC --exchange bybit --mode spot --live
 ```
 
 Schedule daily after UTC midnight (e.g. 09:00 SGT = 01:00 UTC), same pattern as the

@@ -26,16 +26,17 @@ import numpy as np
 # --------------------------------------------------------------------------
 BASELINES = {
     "XAUUSD_v8": {"cagr": 0.0714, "sharpe": 1.27, "max_dd": -0.069, "calmar": 1.03},
-    "BTC_C6":    {"cagr": 0.7808, "sharpe": 1.50, "max_dd": -0.528, "calmar": 1.48},
-    "ETH_C6":    {"cagr": 0.4822, "sharpe": 1.07, "max_dd": -0.440, "calmar": 1.09},
+    # Crypto v2 (vol-targeted, margin-mode params: BTC lev_cap=3, ETH lev_cap=2 + 3*ATR stop)
+    "BTC_C6v2":  {"cagr": 0.7930, "sharpe": 1.54, "max_dd": -0.421, "calmar": 1.88},
+    "ETH_C6v2":  {"cagr": 0.5155, "sharpe": 1.14, "max_dd": -0.393, "calmar": 1.31},
 }
 
 # Per-asset regime-warning thresholds. Wider for crypto because crypto runs at
 # structurally higher vol and DDs.
 THRESHOLDS = {
     "XAUUSD_v8": {"sharpe_min": 0.80, "max_dd_min": -0.12, "trailing_cagr_min": 0.0},
-    "BTC_C6":    {"sharpe_min": 0.90, "max_dd_min": -0.65, "trailing_cagr_min": 0.0},
-    "ETH_C6":    {"sharpe_min": 0.65, "max_dd_min": -0.55, "trailing_cagr_min": 0.0},
+    "BTC_C6v2":  {"sharpe_min": 0.95, "max_dd_min": -0.55, "trailing_cagr_min": 0.0},
+    "ETH_C6v2":  {"sharpe_min": 0.70, "max_dd_min": -0.50, "trailing_cagr_min": 0.0},
 }
 
 
@@ -95,27 +96,25 @@ def run_xauusd():
     }
 
 
-def run_crypto(asset: str):
-    """asset in {'BTC','ETH'}"""
-    from crypto_backtest import load_crypto, run_crypto as runner, buy_hold_crypto
-    from final_crypto import strat_c6, PARAMS
+def run_crypto_v2(asset: str):
+    """asset in {'BTC','ETH'}. Uses C6+RC v2: vol target + leverage cap + optional hard stop."""
+    from crypto_backtest_v2 import load_crypto, signals_c6, run, buy_hold
+    from final_crypto_v2 import PARAMS
 
+    cfg = PARAMS[asset]
     df = load_crypto(asset)
-    sig = strat_c6(df, **PARAMS[asset])
-    res = runner(sig, leverage=1.0)
-    m_full = res["metrics"]
+    sig = signals_c6(df, **cfg["signal"])
+    risk = cfg["risk_margin"]   # use margin params as the "production" baseline
 
-    sig_oos = strat_c6(df, **PARAMS[asset]).loc["2023-01-01":]
-    m_oos = runner(sig_oos, leverage=1.0)["metrics"]
+    m_full = run(sig, **risk)["metrics"]
+    m_oos  = run(sig.loc["2023-01-01":], **risk)["metrics"]
 
-    df_24 = df.loc["2024-01-01":]
-    if len(df_24) > 250:
-        sig_24 = strat_c6(df, **PARAMS[asset]).loc["2024-01-01":]
-        m_24 = runner(sig_24, leverage=1.0)["metrics"]
+    if len(df.loc["2024-01-01":]) > 250:
+        m_24 = run(sig.loc["2024-01-01":], **risk)["metrics"]
     else:
         m_24 = {}
 
-    bh = buy_hold_crypto(df)["metrics"]
+    bh = buy_hold(df)["metrics"]
     bh["calmar"] = bh["cagr"] / abs(bh["max_dd"]) if bh["max_dd"] else 0
     return {
         "data_first": df.index.min().date().isoformat(),
@@ -213,9 +212,9 @@ def main():
 
         log("\nRunning backtests ...")
         results = {
-            ("XAUUSD_v8", "XAU/USD v8 MacroTrend"): run_xauusd(),
-            ("BTC_C6",    "BTC C6 VolBreakout"):    run_crypto("BTC"),
-            ("ETH_C6",    "ETH C6 VolBreakout"):    run_crypto("ETH"),
+            ("XAUUSD_v8", "XAU/USD v8 MacroTrend"):       run_xauusd(),
+            ("BTC_C6v2",  "BTC C6+RC v2 VolBreakout"):    run_crypto_v2("BTC"),
+            ("ETH_C6v2",  "ETH C6+RC v2 VolBreakout"):    run_crypto_v2("ETH"),
         }
 
         blocks = []
